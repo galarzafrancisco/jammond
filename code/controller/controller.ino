@@ -3,7 +3,9 @@
 Libs
 
 ----------------------------------------------------------------------------------------------------------------------------- */
-
+// #include <MIDI.h> // < used to read/write MIDI messages via the serial peripheral interface
+// #include <Arduino.h>
+#include <BLEMidi.h>
 
 /* -----------------------------------------------------------------------------------------------------------------------------
 
@@ -60,7 +62,7 @@ int drawbar_CC_map[3][9] = {
 Global variables
 
 ----------------------------------------------------------------------------------------------------------------------------- */
-#define DEADBAND 8         // this is how much an analog value must change for us to consider it: protects us from noise
+#define DEADBAND 32        // this is how much an analog value must change for us to consider it: protects us from noise (not really, I need a low pass filter). ACD is 10bits so 32/4096*256=2 MIDI
 int analog_input_idx = 0;  // used to index the analog components to be accessed via the 4051 multiplexers
 int drawbar_selected = DRAWBAR_UPPER_IDX;
 #define LESLIE_STOP 0
@@ -101,6 +103,10 @@ Start serial MIDI
 /*
 Start BLE MIDI
 */
+void startBLEMIDI() {
+  Serial.println("Initializing bluetooth");
+  BLEMidiServer.begin("Jammon-d");
+}
 
 void setup() {
   // Logger
@@ -109,6 +115,8 @@ void setup() {
   // Call setup functions
   setupPins();
 
+  // Start modules
+  startBLEMIDI();
 }
 
 
@@ -124,6 +132,29 @@ If it's a note on/off it writes it to both Serial Tx and BLE
 otherwise it ignores it.
 */
 
+/*
+sendMidiCC sends a CC message
+*/
+void sendMidiCC(int channel, int number, int value)
+{
+  // Don't send if CC number is zero
+  if (number == 0) return;
+  
+  Serial.print("Sending MIDI CC #");
+  Serial.print(number);
+  Serial.print(" value: ");
+  Serial.println(value);
+  // // Send serial MIDI
+  // MIDI.sendControlChange(number, value, channel); // Midi lib wants channels 1~16
+
+  // Send BLE MIDI
+  if (BLEMidiServer.isConnected()) {
+    Serial.println("BLE OK");
+    BLEMidiServer.controlChange(midi_channel-1, number, value); // wants MIDI channels 0-15 and I do 1-16 in my conifg
+  }
+
+  // TODO: implement Send USB
+}
 
 /*
 Read analog inputs
@@ -149,6 +180,10 @@ void readAnalogComponents() {
   // Now we have a 12 bit (4096) ADC and MIDI is 7 bit (128)
   int midi_value = current_value >> 5;
 
+  // Send MIDI CC
+  if (analog_input_idx < 9) {  // drawbar
+    sendMidiCC(midi_channel, drawbar_CC_map[drawbar_selected][analog_input_idx], midi_value);
+  }
 }
 
 /* -----------------------------------------------------------------------------------------------------------------------------
