@@ -33,12 +33,12 @@ Define digital outputs for indexing the multiplexers
 /*
 Define MIDI Rx & Tx
 */
+#define MIDI_RX_PIN 16
+#define MIDI_BAUD_RATE 31250
 
 /*
 Define I2S lines
 */
-
-
 
 /* -----------------------------------------------------------------------------------------------------------------------------
 
@@ -49,30 +49,27 @@ MIDI CC maps
 #define DRAWBAR_LOWER_IDX 1
 #define DRAWBAR_PEDALBOARD_IDX 2
 
-int drawbar_CC_map[3][9] = {
+uint8_t drawbar_CC_map[3][9] = {
+  // MIDI CC # range is 0-127 so 7 bits
   { 12, 13, 14, 15, 16, 17, 18, 19, 20 },  // Upper
   { 21, 22, 23, 24, 25, 26, 27, 28, 29 },  // Lower
   { 33, 35, 0, 0, 0, 0, 0, 0, 0 }          // Pedalboard
 };
-
-
 
 /* -----------------------------------------------------------------------------------------------------------------------------
 
 Global variables
 
 ----------------------------------------------------------------------------------------------------------------------------- */
-#define DEADBAND 32        // this is how much an analog value must change for us to consider it: protects us from noise (not really, I need a low pass filter). ACD is 10bits so 32/4096*256=2 MIDI
-int analog_input_idx = 0;  // used to index the analog components to be accessed via the 4051 multiplexers
-int drawbar_selected = DRAWBAR_UPPER_IDX;
+#define DEADBAND 32            // this is how much an analog value must change for us to consider it: protects us from noise (not really, I need a low pass filter). ACD is 10bits so 32/4096*256=2 MIDI
+uint8_t analog_input_idx = 0;  // used to index the analog components to be accessed via the 4051 multiplexers
+uint8_t drawbar_selected = DRAWBAR_UPPER_IDX;
 #define LESLIE_STOP 0
 #define LESLIE_SLOW 1
 #define LESLIE_FAST 2
-int leslie_speed = LESLIE_SLOW;
-int analog_values[17] = { -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 };
-int midi_channel = 1;
-
-
+uint8_t leslie_speed = LESLIE_SLOW;
+uint16_t analog_values[17] = { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };  // ADC is 12 bits
+uint8_t midi_channel = 1;
 
 /* -----------------------------------------------------------------------------------------------------------------------------
 
@@ -135,22 +132,17 @@ otherwise it ignores it.
 /*
 sendMidiCC sends a CC message
 */
-void sendMidiCC(int channel, int number, int value)
-{
+void sendMidiCC(uint8_t channel, uint8_t number, uint8_t value) {
   // Don't send if CC number is zero
-  if (number == 0) return;
-  
-  Serial.print("Sending MIDI CC #");
-  Serial.print(number);
-  Serial.print(" value: ");
-  Serial.println(value);
+  if (number == 0)
+    return;
+
   // // Send serial MIDI
   // MIDI.sendControlChange(number, value, channel); // Midi lib wants channels 1~16
 
   // Send BLE MIDI
   if (BLEMidiServer.isConnected()) {
-    Serial.println("BLE OK");
-    BLEMidiServer.controlChange(midi_channel-1, number, value); // wants MIDI channels 0-15 and I do 1-16 in my conifg
+    BLEMidiServer.controlChange(midi_channel - 1, number, value);  // wants MIDI channels 0-15 and I do 1-16 in my conifg
   }
 
   // TODO: implement Send USB
@@ -161,7 +153,8 @@ Read analog inputs
 */
 void readAnalogComponents() {
   // TODO: [note] Only reading the first 9 (drawbars) for now. This is a test and I don't have the other pots connected.
-  if (++analog_input_idx > 8) analog_input_idx = 0;  // increment multiplexer index to read analog components
+  if (++analog_input_idx > 8)
+    analog_input_idx = 0;  // increment multiplexer index to read analog components
 
   // Select inputs from multiplexers
   digitalWrite(MULTIPLEXERS_IDX_0, (analog_input_idx & 7) & 1);
@@ -169,16 +162,17 @@ void readAnalogComponents() {
   digitalWrite(MULTIPLEXERS_IDX_2, (analog_input_idx & 7) >> 2 & 1);
 
   // Select which multiplexer to use and then read from it
-  int current_value = analogRead(analog_input_idx > 7 ? MULTIPLEXER_2_IN : MULTIPLEXER_1_IN);
+  uint16_t current_value = analogRead(analog_input_idx > 7 ? MULTIPLEXER_2_IN : MULTIPLEXER_1_IN);
 
   // See how much this value changed. Ignore small changes (noise).
-  int diff = abs(current_value - analog_values[analog_input_idx]);
-  if (diff <= DEADBAND) return; // TODO: implement low-pass IIR filter instead
+  uint16_t diff = abs(current_value - analog_values[analog_input_idx]);
+  if (diff <= DEADBAND)
+    return;  // TODO: implement low-pass IIR filter instead
 
   analog_values[analog_input_idx] = current_value;
 
   // Now we have a 12 bit (4096) ADC and MIDI is 7 bit (128)
-  int midi_value = current_value >> 5;
+  uint8_t midi_value = current_value >> 5;
 
   // Send MIDI CC
   if (analog_input_idx < 9) {  // drawbar
