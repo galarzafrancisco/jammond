@@ -62,15 +62,17 @@ int drawbar_CC_map[3][9] = {
 Global variables
 
 ----------------------------------------------------------------------------------------------------------------------------- */
-#define DEADBAND 32        // this is how much an analog value must change for us to consider it: protects us from noise (not really, I need a low pass filter). ACD is 10bits so 32/4096*256=2 MIDI
-int analog_input_idx = 0;  // used to index the analog components to be accessed via the 4051 multiplexers
-int drawbar_selected = DRAWBAR_UPPER_IDX;
+#define DEADBAND 2            // ignore CC changes that move less than this value
+#define ANALOG_LPF_ALPHA 0.5  // used to filter high frequency noise from analog reads
+uint8_t analog_input_idx = 0;     // used to index the analog components to be accessed via the 4051 multiplexers
+uint8_t drawbar_selected = DRAWBAR_UPPER_IDX;
 #define LESLIE_STOP 0
 #define LESLIE_SLOW 1
 #define LESLIE_FAST 2
-int leslie_speed = LESLIE_SLOW;
-int analog_values[17] = { -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 };
-int midi_channel = 1;
+uint8_t leslie_speed = LESLIE_SLOW;
+float analog_inputs_values_read[17] = { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
+uint8_t analog_inputs_midi_values_sent[17] = { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };  // 7 bits
+uint8_t midi_channel = 1;
 
 
 
@@ -135,22 +137,21 @@ otherwise it ignores it.
 /*
 sendMidiCC sends a CC message
 */
-void sendMidiCC(int channel, int number, int value)
-{
+void sendMidiCC(int channel, int number, int value) {
   // Don't send if CC number is zero
   if (number == 0) return;
-  
-  Serial.print("Sending MIDI CC #");
-  Serial.print(number);
-  Serial.print(" value: ");
-  Serial.println(value);
+
+  // Serial.print("Sending MIDI CC #");
+  // Serial.print(number);
+  // Serial.print(" value: ");
+  // Serial.println(value);
   // // Send serial MIDI
   // MIDI.sendControlChange(number, value, channel); // Midi lib wants channels 1~16
 
   // Send BLE MIDI
   if (BLEMidiServer.isConnected()) {
-    Serial.println("BLE OK");
-    BLEMidiServer.controlChange(midi_channel-1, number, value); // wants MIDI channels 0-15 and I do 1-16 in my conifg
+    // Serial.println("BLE OK");
+    BLEMidiServer.controlChange(midi_channel - 1, number, value);  // wants MIDI channels 0-15 and I do 1-16 in my conifg
   }
 
   // TODO: implement Send USB
@@ -169,19 +170,32 @@ void readAnalogComponents() {
   digitalWrite(MULTIPLEXERS_IDX_2, (analog_input_idx & 7) >> 2 & 1);
 
   // Select which multiplexer to use and then read from it
-  int current_value = analogRead(analog_input_idx > 7 ? MULTIPLEXER_2_IN : MULTIPLEXER_1_IN);
+  float current_value = analogRead(analog_input_idx > 7 ? MULTIPLEXER_2_IN : MULTIPLEXER_1_IN); // 12 bits
 
-  // See how much this value changed. Ignore small changes (noise).
-  int diff = abs(current_value - analog_values[analog_input_idx]);
-  if (diff <= DEADBAND) return; // TODO: implement low-pass IIR filter instead
+  // Run the read through an IIR LPF to remove noise
+  analog_inputs_values_read[analog_input_idx] += ANALOG_LPF_ALPHA * (current_value - analog_inputs_values_read[analog_input_idx]);
 
-  analog_values[analog_input_idx] = current_value;
+  uint8_t midi_value = (uint16_t)analog_inputs_values_read[analog_input_idx] >> 5; // Shift the ADC's 12 bits to MIDI's 7 bits
 
-  // Now we have a 12 bit (4096) ADC and MIDI is 7 bit (128)
-  int midi_value = current_value >> 5;
+  // Debug for drawbar 9 (pin is noisy)
+  // if (analog_input_idx == 8) {
+  //   Serial.print("ADC: ");
+  //   Serial.print(current_value);
+  //   Serial.print(" | Current after LPF: ");
+  //   Serial.print(analog_inputs_values_read[analog_input_idx]);
+  //   Serial.print(" | MIDI value: ");
+  //   Serial.print(midi_value);
+  //   Serial.print(" | Previously sent: ");
+  //   Serial.println(analog_inputs_midi_values_sent[analog_input_idx]);
+  // }
+  // If the value changed hasn't changed, move on
+  if (abs(midi_value - analog_inputs_midi_values_sent[analog_input_idx]) < DEADBAND) return;
 
-  // Send MIDI CC
-  if (analog_input_idx < 9) {  // drawbar
+  // Update the value
+  analog_inputs_midi_values_sent[analog_input_idx] = midi_value;
+
+    // Send MIDI CC
+    if (analog_input_idx < 9) {  // drawbar
     sendMidiCC(midi_channel, drawbar_CC_map[drawbar_selected][analog_input_idx], midi_value);
   }
 }
