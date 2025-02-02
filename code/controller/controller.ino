@@ -68,6 +68,13 @@ uint8_t drawbar_CC_map[3][9] = {
   { 33, 35, 0, 0, 0, 0, 0, 0, 0 }          // Pedalboard
 };
 
+#define MIDI_NOTE_ON 0x90
+#define MIDI_NOTE_OFF 0x80
+#define MIDI_MASK_STATUS_BYTE 0b10000000
+#define MIDI_MASK_REAL_TIME_BYTE 0b11111000
+#define MIDI_MASK_VOICE_COMMAND_BYTE 0b11110000
+#define MIDI_MASK_VOICE_CHANNEL_BYTE 0b00001111
+
 /* -----------------------------------------------------------------------------------------------------------------------------
 
 Global variables
@@ -164,11 +171,6 @@ uint8_t serialMidiStatus = 0;  // holds the MIDI Status byte received and being 
 uint8_t serialMidiRawData[SERIAL_MIDI_DATA_BYTES_LENGTH];  // holds the data bytes received
 uint8_t serialMidiPendingDataBytes = 0;                    // number of data bytes pending
 
-#define MIDI_MASK_STATUS_BYTE 0b10000000
-#define MIDI_MASK_REAL_TIME_BYTE 0b11111000
-#define MIDI_MASK_VOICE_COMMAND_BYTE 0b11110000
-#define MIDI_MASK_VOICE_CHANNEL_BYTE 0b00001111
-
 void midiThrough() {
   if (!SerialMIDI.available()) {
     // No messages, move on.
@@ -191,7 +193,7 @@ void midiThrough() {
     uint8_t command = byteReceived & MIDI_MASK_VOICE_COMMAND_BYTE;
 
     // Note on / off have 2 data bytes
-    if (command == 0x90 || command == 0x80) {
+    if (command == MIDI_NOTE_ON || command == MIDI_NOTE_OFF) {
       serialMidiPendingDataBytes = 2;
       serialMidiStatus = byteReceived;  // store the received status byte
       serialMidiState = SERIAL_MIDI_STATE_RECEIVED_STATUS_BYTE;
@@ -220,10 +222,10 @@ void midiThrough() {
       // Process the message
       uint8_t command = serialMidiStatus & MIDI_MASK_VOICE_COMMAND_BYTE;
       switch (command) {
-        case 0x90:  // Note on
+        case MIDI_NOTE_ON:  // 0x90
           sendMidiNoteOn(serialMidiStatus & MIDI_MASK_VOICE_CHANNEL_BYTE, serialMidiRawData[0], serialMidiRawData[1]);
           break;
-        case 0x80:  // Note off
+        case MIDI_NOTE_OFF:  // 0x80
           sendMidiNoteOff(serialMidiStatus & MIDI_MASK_VOICE_CHANNEL_BYTE, serialMidiRawData[0], serialMidiRawData[1]);
           break;
       }
@@ -241,7 +243,10 @@ void sendMidiCC(uint8_t channel, uint8_t number, uint8_t value) {
   if (number == 0)
     return;
 
-  // TODO: Send serial MIDI
+  // Send serial MIDI
+  uint8_t statusByte = (number << 4) | channel;
+  SerialMIDI.write(statusByte);
+  SerialMIDI.write(value);
 
   // Send BLE MIDI
   if (BLEMidiServer.isConnected()) {
@@ -251,27 +256,45 @@ void sendMidiCC(uint8_t channel, uint8_t number, uint8_t value) {
   // TODO: implement Send USB
 }
 
-// Sends a Note On message via BLE MIDI.
+// Sends a Note On message via Serial and BLE MIDI.
 // channel: MIDI channel (0–15)
 // note: MIDI note number (0–127)
 // velocity: MIDI velocity (0–127)
 void sendMidiNoteOn(uint8_t channel, uint8_t note, uint8_t velocity) {
 
+  // Send serial MIDI
+  uint8_t statusByte = MIDI_NOTE_ON | channel;
+  SerialMIDI.write(statusByte);
+  SerialMIDI.write(note);
+  SerialMIDI.write(velocity);
+
   // Send BLE MIDI
   if (BLEMidiServer.isConnected()) {
     BLEMidiServer.noteOn(channel, note, velocity);
   }
+
+  return;
+
 }
 
-// Sends a Note Off message via BLE MIDI.
-// channel: MIDI channel (1–16)
+// Sends a Note Off message via Serial and BLE MIDI.
+// channel: MIDI channel (0–15)
 // note: MIDI note number (0–127)
 // velocity: MIDI velocity (0–127)
 void sendMidiNoteOff(uint8_t channel, uint8_t note, uint8_t velocity) {
+  
+  // Send serial MIDI
+  uint8_t statusByte = MIDI_NOTE_OFF | channel;
+  SerialMIDI.write(statusByte);
+  SerialMIDI.write(note);
+  SerialMIDI.write(velocity);
+
+  // Send BLE MIDI
   if (BLEMidiServer.isConnected()) {
-    // BLE MIDI expects channels 0-15.
     BLEMidiServer.noteOff(channel, note, velocity);
   }
+
+  return;
 }
 
 /*
