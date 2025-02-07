@@ -1,3 +1,7 @@
+# esp-idf
+build
+managed_components
+
 # Prerequisites
 *.d
 
