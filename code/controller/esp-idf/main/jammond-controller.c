@@ -393,6 +393,12 @@ void setupUSB()
     xTaskCreate(midi_task_read_and_discard, "midi_task_read_and_discard", 4 * 1024, NULL, 5, NULL);
 }
 
+
+void setupSerialMIDI() {
+
+}
+
+
 /* -----------------------------------------------------------------------------------------------------------------------------
 
 Let's get cracking
@@ -406,6 +412,9 @@ void app_main(void)
 
     // Start USB interface
     setupUSB();
+
+    // Start serial MIDI
+    setupSerialMIDI();
 
     // Main loop
     while (1)
