@@ -13,6 +13,7 @@ Libs
 #include "freertos/FreeRTOS.h"   // delays and stuff
 #include "freertos/task.h"       // delays and stuff
 #include "driver/gpio.h"         // gpio
+#include "driver/uart.h"         // serial
 #include "tinyusb.h"             // usb
 #include "esp_timer.h"
 
@@ -59,6 +60,8 @@ The FREENOVE ESP32-s3 has 2 UARTs (I think! based on the pinout. Double check th
 - U0: used for the built-in usb bridge.
 - U1: free. Rx/Tx are 17/18, also called U1TXD and U1RXD
 */
+#define MIDI_UART UART_NUM_1
+#define MIDI_UART_RX 18
 
 /* -----------------------------------------------------------------------------------------------------------------------------
 
@@ -113,6 +116,14 @@ MIDI config
 */
 uint8_t midi_channel = 0;   // 0-15 maps to 1-16
 uint8_t midi_cable_num = 0; // TinyUSB concept: MIDI jack associated with USB endpoint (?)
+/*
+Serial MIDI
+*/
+#define SERIAL_MIDI_BAUD_RATE 31250
+const int serial_midi_buffer_size = (1024 * 2);
+QueueHandle_t serial_midi_queue;
+#define MIDI_RX_BUF_SIZE 3
+uint8_t serial_midi_buffer[MIDI_RX_BUF_SIZE]; // Allocated on stack
 
 /* -----------------------------------------------------------------------------------------------------------------------------
 
@@ -205,41 +216,183 @@ void sendMidiCC(uint8_t channel, uint8_t number, uint8_t value)
 }
 
 /*
+sendMidiNoteOn
+*/
+void sendMidiNoteOn(uint8_t channel, uint8_t note, uint8_t velocity)
+{
+    uint8_t statusByte = MIDI_NOTE_ON | channel;
+    // USB
+    if (tud_midi_mounted())
+    {
+        uint8_t data[3] = {statusByte, note, velocity};
+        tud_midi_stream_write(midi_cable_num, data, 3);
+    }
+}
+
+/*
+sendMidiNoteOff
+*/
+void sendMidiNoteOff(uint8_t channel, uint8_t note, uint8_t velocity)
+{
+    uint8_t statusByte = MIDI_NOTE_OFF | channel;
+    // USB
+    if (tud_midi_mounted())
+    {
+        uint8_t data[3] = {statusByte, note, velocity};
+        tud_midi_stream_write(midi_cable_num, data, 3);
+    }
+}
+
+/*
+midiThrough read 1 MIDI message from Serial Rx.
+If it's a note on/off it writes it to USB,
+otherwise it ignores it.
+*/
+// State machine
+#define SERIAL_MIDI_STATE_WAITING_FOR_STATUS_BYTE 0
+#define SERIAL_MIDI_STATE_RECEIVED_STATUS_BYTE 1
+uint8_t serialMidiState = SERIAL_MIDI_STATE_WAITING_FOR_STATUS_BYTE;
+// Spec of MIDI messages: https://midi.org/summary-of-midi-1-0-messages
+uint8_t serialMidiStatus = 0; // holds the MIDI Status byte received and being processed
+#define SERIAL_MIDI_DATA_BYTES_LENGTH 2
+uint8_t serialMidiRawData[SERIAL_MIDI_DATA_BYTES_LENGTH]; // holds the data bytes received
+uint8_t serialMidiPendingDataBytes = 0;                   // number of data bytes pending
+
+void midi_in_task()
+{
+    while (1)
+    {
+        // Read serial
+        // Read from UART
+        // Read serial_midi_buffer from UART.
+
+        // ESP_ERROR_CHECK(uart_get_buffered_serial_midi_buffer_len(MIDI_UART, (size_t*)&length));
+        int rxBytes = uart_read_bytes(MIDI_UART, serial_midi_buffer, MIDI_RX_BUF_SIZE, 10 / portTICK_PERIOD_MS);
+        if (rxBytes < 1)
+        {
+            vTaskDelay(pdMS_TO_TICKS(1)); // yield
+            continue;
+        }
+
+        for (int buf_idx = 0; buf_idx < rxBytes; buf_idx++) {
+
+            uint8_t byteReceived = serial_midi_buffer[buf_idx];
+    
+            // Check if the byte is status (begining of a message, MSB=1) or data (continuation of a message, MSB=00)
+            if (byteReceived & MIDI_MASK_STATUS_BYTE)
+            {
+    
+                // Status message
+    
+                // It could be a real time message. If so, ignore it as it could be placed between other messages.
+                // Real time messages have the 5 MSB set to 1
+                if ((byteReceived & MIDI_MASK_REAL_TIME_BYTE) == MIDI_MASK_REAL_TIME_BYTE)
+                {
+                    // ESP_LOGI(TAG, "Received status byte: %02X - real time message", byteReceived);
+                    continue;
+                }
+    
+                // Extract command to calculate how many data bytes we need
+                uint8_t command = byteReceived & MIDI_MASK_VOICE_COMMAND_BYTE;
+    
+                // Note on / off have 2 data bytes
+                if (command == MIDI_NOTE_ON || command == MIDI_NOTE_OFF)
+                {
+                    ESP_LOGI(TAG, "Received status byte: %02X - note on/off", byteReceived);
+                    serialMidiPendingDataBytes = 2;
+                    serialMidiStatus = byteReceived; // store the received status byte
+                    serialMidiState = SERIAL_MIDI_STATE_RECEIVED_STATUS_BYTE;
+                }
+                else
+                {
+                    ESP_LOGI(TAG, "Received status byte: %02X - other when machine state is %d", byteReceived, serialMidiState);
+                    // We don't care about any other message, so let's ignore any data byte we receive
+                    serialMidiState = SERIAL_MIDI_STATE_WAITING_FOR_STATUS_BYTE;
+                }
+    
+                continue;
+            }
+            else
+            {
+                // Data message
+    
+                // Ignore any data byte if we are waiting for a status byte
+                if (serialMidiState == SERIAL_MIDI_STATE_WAITING_FOR_STATUS_BYTE)
+                {
+                    ESP_LOGI(TAG, "Received data byte: %02X when waiting for status byte. Ignore", byteReceived);
+                    continue;
+                }
+    
+                // Store the data byte
+                serialMidiRawData[SERIAL_MIDI_DATA_BYTES_LENGTH - serialMidiPendingDataBytes] = byteReceived;
+                serialMidiPendingDataBytes--;
+                ESP_LOGI(TAG, "Received data byte: %02X when pending bytes: %d", byteReceived, serialMidiPendingDataBytes);
+    
+                if (serialMidiPendingDataBytes < 1)
+                {
+    
+                    // We're done receiving data
+                    serialMidiState = SERIAL_MIDI_STATE_WAITING_FOR_STATUS_BYTE;
+                    // Process the message
+                    uint8_t command = serialMidiStatus & MIDI_MASK_VOICE_COMMAND_BYTE;
+                    switch (command)
+                    {
+                    case MIDI_NOTE_ON: // 0x90
+                        sendMidiNoteOn(serialMidiStatus & MIDI_MASK_VOICE_CHANNEL_BYTE, serialMidiRawData[0], serialMidiRawData[1]);
+                        break;
+                    case MIDI_NOTE_OFF: // 0x80
+                        sendMidiNoteOff(serialMidiStatus & MIDI_MASK_VOICE_CHANNEL_BYTE, serialMidiRawData[0], serialMidiRawData[1]);
+                        break;
+                    }
+                }
+            }
+        }
+
+        vTaskDelay(pdMS_TO_TICKS(1)); // yield
+    }
+}
+
+/*
 Read analog inputs
 */
-void readAnalogComponents(void)
+void read_analog_task()
 {
-    // TODO: [note] Only reading the first 9 (drawbars) for now. This is a test and I don't have the other pots connected.
-    if (++analog_input_idx > 8)
-        analog_input_idx = 0; // increment multiplexer index to read analog components
-
-    // Select inputs from multiplexers
-    gpio_set_level(MULTIPLEXERS_IDX_0, (analog_input_idx & 7) & 1);
-    gpio_set_level(MULTIPLEXERS_IDX_1, (analog_input_idx & 7) >> 1 & 1);
-    gpio_set_level(MULTIPLEXERS_IDX_2, (analog_input_idx & 7) >> 2 & 1);
-
-    // Give the multiplexer a second to switch
-    vTaskDelay(pdMS_TO_TICKS(10));
-
-    // Select which multiplexer to use and then read from it
-    int value;
-    esp_err_t err = adc_oneshot_read(multiplexers_adc_handle, analog_input_idx > 7 ? MULTIPLEXER_1_IN_ADC_CHANNEL : MULTIPLEXER_2_IN_ADC_CHANNEL, &value);
-    if (err != ESP_OK)
+    while (1)
     {
-        ESP_LOGI(TAG, "Failed to read analog %d: %s", analog_input_idx, err);
-        return;
-    }
-    analog_values[analog_input_idx] = value;
+        // TODO: [note] Only reading the first 9 (drawbars) for now. This is a test and I don't have the other pots connected.
+        if (++analog_input_idx > 8)
+            analog_input_idx = 0; // increment multiplexer index to read analog components
 
-    if (analog_input_idx < 9)
-    {
-        // It's a drawbar
-        uint8_t midi_value = value >> 5; // shift 12 bits from the ADC to 7 bits wanted by MIDI
-        if (midi_value != drawbar_midi_values[analog_input_idx])
+        // Select inputs from multiplexers
+        gpio_set_level(MULTIPLEXERS_IDX_0, (analog_input_idx & 7) & 1);
+        gpio_set_level(MULTIPLEXERS_IDX_1, (analog_input_idx & 7) >> 1 & 1);
+        gpio_set_level(MULTIPLEXERS_IDX_2, (analog_input_idx & 7) >> 2 & 1);
+
+        // Give the multiplexer a second to switch
+        vTaskDelay(pdMS_TO_TICKS(10));
+
+        // Select which multiplexer to use and then read from it
+        int value;
+        esp_err_t err = adc_oneshot_read(multiplexers_adc_handle, analog_input_idx > 7 ? MULTIPLEXER_1_IN_ADC_CHANNEL : MULTIPLEXER_2_IN_ADC_CHANNEL, &value);
+        if (err != ESP_OK)
         {
-            drawbar_midi_values[analog_input_idx] = midi_value;
-            sendMidiCC(midi_channel, drawbar_CC_map[drawbar_selected][analog_input_idx], drawbar_midi_values[analog_input_idx]);
+            ESP_LOGI(TAG, "Failed to read analog %d: %s", analog_input_idx, err);
+            return;
         }
+        analog_values[analog_input_idx] = value;
+
+        if (analog_input_idx < 9)
+        {
+            // It's a drawbar
+            uint8_t midi_value = value >> 5; // shift 12 bits from the ADC to 7 bits wanted by MIDI
+            if (midi_value != drawbar_midi_values[analog_input_idx])
+            {
+                drawbar_midi_values[analog_input_idx] = midi_value;
+                sendMidiCC(midi_channel, drawbar_CC_map[drawbar_selected][analog_input_idx], drawbar_midi_values[analog_input_idx]);
+            }
+        }
+
+        vTaskDelay(pdMS_TO_TICKS(1)); // yield
     }
 }
 
@@ -393,11 +546,32 @@ void setupUSB()
     xTaskCreate(midi_task_read_and_discard, "midi_task_read_and_discard", 4 * 1024, NULL, 5, NULL);
 }
 
+void setupSerialMIDI()
+{
+    // Allocate memory for the Rx buffer
+    // uint8_t *serial_midi_buffer = (uint8_t *)malloc(MIDI_RX_BUF_SIZE + 1);
 
-void setupSerialMIDI() {
+    const uart_port_t uart_num = UART_NUM_2;
+    uart_config_t uart_config = {
+        .baud_rate = SERIAL_MIDI_BAUD_RATE,
+        .data_bits = UART_DATA_8_BITS,
+        .parity = UART_PARITY_DISABLE,
+        .stop_bits = UART_STOP_BITS_1,
+        .flow_ctrl = UART_HW_FLOWCTRL_CTS_RTS,
+        .rx_flow_ctrl_thresh = 122,
+    };
+    // Configure UART parameters
+    ESP_ERROR_CHECK(uart_param_config(uart_num, &uart_config));
 
+    // // Set UART pins(TX: IO4, RX: IO5, RTS: IO18, CTS: IO19)
+    // ESP_ERROR_CHECK(uart_set_pin(UART_NUM_2, 4, 5, 18, 19));
+    // Tx, Rx, Rts, Cts (only Rx)
+    ESP_ERROR_CHECK(uart_set_pin(MIDI_UART, UART_PIN_NO_CHANGE, MIDI_UART_RX, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE));
+
+    // Install UART driver using an event queue here
+    ESP_ERROR_CHECK(uart_driver_install(MIDI_UART, serial_midi_buffer_size,
+                                        serial_midi_buffer_size, 10, &serial_midi_queue, 0));
 }
-
 
 /* -----------------------------------------------------------------------------------------------------------------------------
 
@@ -416,17 +590,24 @@ void app_main(void)
     // Start serial MIDI
     setupSerialMIDI();
 
-    // Main loop
-    while (1)
-    {
-        // TODO: explore making this a task. Maybe I can have 1 core do coms & non critical stuff
-        // while the other core does real time audio processing.
-        for (int i = 0; i < 9; i++)
-        {
-            readAnalogComponents();
-        }
-        ESP_LOGI(TAG, "drawbar reads: [%d] [%d] [%d] [%d] [%d] [%d] [%d] [%d] [%d]", analog_values[0], analog_values[1], analog_values[2], analog_values[3], analog_values[4], analog_values[5], analog_values[6], analog_values[7], analog_values[8]);
+    // // TODO: explore making this a task. Maybe I can have 1 core do coms & non critical stuff
+    // // while the other core does real time audio processing.
+    // for (int i = 0; i < 9; i++)
+    // {
+    //     readAnalogComponents();
+    // }
+    // // ESP_LOGI(TAG, "drawbar reads: [%d] [%d] [%d] [%d] [%d] [%d] [%d] [%d] [%d]", analog_values[0], analog_values[1], analog_values[2], analog_values[3], analog_values[4], analog_values[5], analog_values[6], analog_values[7], analog_values[8]);
 
-        // vTaskDelay(pdMS_TO_TICKS(1000));
-    }
+    /*
+    Priorities so far:
+    - audio gen 6
+    - audio out: 5
+    - midi in: 4
+    - midi out: 3
+    - analog read: 2
+    */
+    xTaskCreate(midi_in_task, "midi_in_task", 2048, NULL, 4, NULL);
+    xTaskCreate(read_analog_task, "read_analog_task", 4096, NULL, 3, NULL); // 2048 overflows
+
+    // vTaskDelay(pdMS_TO_TICKS(1000));
 }
