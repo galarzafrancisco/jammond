@@ -122,7 +122,7 @@ Serial MIDI
 #define SERIAL_MIDI_BAUD_RATE 31250
 const int serial_midi_buffer_size = (1024 * 2);
 QueueHandle_t serial_midi_queue;
-#define MIDI_RX_BUF_SIZE 3
+#define MIDI_RX_BUF_SIZE 1
 uint8_t serial_midi_buffer[MIDI_RX_BUF_SIZE]; // Allocated on stack
 
 /* -----------------------------------------------------------------------------------------------------------------------------
@@ -256,7 +256,7 @@ uint8_t serialMidiState = SERIAL_MIDI_STATE_WAITING_FOR_STATUS_BYTE;
 uint8_t serialMidiStatus = 0; // holds the MIDI Status byte received and being processed
 #define SERIAL_MIDI_DATA_BYTES_LENGTH 2
 uint8_t serialMidiRawData[SERIAL_MIDI_DATA_BYTES_LENGTH]; // holds the data bytes received
-uint8_t serialMidiPendingDataBytes = 0;                   // number of data bytes pending
+volatile uint8_t serialMidiPendingDataBytes = 0;                   // number of data bytes pending
 
 void midi_in_task()
 {
@@ -274,16 +274,17 @@ void midi_in_task()
             continue;
         }
 
-        for (int buf_idx = 0; buf_idx < rxBytes; buf_idx++) {
+        for (int buf_idx = 0; buf_idx < rxBytes; buf_idx++)
+        {
 
             uint8_t byteReceived = serial_midi_buffer[buf_idx];
-    
+
             // Check if the byte is status (begining of a message, MSB=1) or data (continuation of a message, MSB=00)
             if (byteReceived & MIDI_MASK_STATUS_BYTE)
             {
-    
+
                 // Status message
-    
+
                 // It could be a real time message. If so, ignore it as it could be placed between other messages.
                 // Real time messages have the 5 MSB set to 1
                 if ((byteReceived & MIDI_MASK_REAL_TIME_BYTE) == MIDI_MASK_REAL_TIME_BYTE)
@@ -291,14 +292,14 @@ void midi_in_task()
                     // ESP_LOGI(TAG, "Received status byte: %02X - real time message", byteReceived);
                     continue;
                 }
-    
+
                 // Extract command to calculate how many data bytes we need
                 uint8_t command = byteReceived & MIDI_MASK_VOICE_COMMAND_BYTE;
-    
+
                 // Note on / off have 2 data bytes
                 if (command == MIDI_NOTE_ON || command == MIDI_NOTE_OFF)
                 {
-                    ESP_LOGI(TAG, "Received status byte: %02X - note on/off", byteReceived);
+                    ESP_LOGI(TAG, "Received status byte: %02X - note %s", byteReceived, byteReceived == MIDI_NOTE_ON ? "ON" : "OFF");
                     serialMidiPendingDataBytes = 2;
                     serialMidiStatus = byteReceived; // store the received status byte
                     serialMidiState = SERIAL_MIDI_STATE_RECEIVED_STATUS_BYTE;
@@ -309,28 +310,35 @@ void midi_in_task()
                     // We don't care about any other message, so let's ignore any data byte we receive
                     serialMidiState = SERIAL_MIDI_STATE_WAITING_FOR_STATUS_BYTE;
                 }
-    
+
                 continue;
             }
             else
             {
                 // Data message
-    
-                // Ignore any data byte if we are waiting for a status byte
+
+                // If we get a data message while we are waiting for a status byte,
+                // it's likely that midi is using "running status" which means it's the same status byte as before
                 if (serialMidiState == SERIAL_MIDI_STATE_WAITING_FOR_STATUS_BYTE)
                 {
-                    ESP_LOGI(TAG, "Received data byte: %02X when waiting for status byte. Ignore", byteReceived);
-                    continue;
+                    serialMidiState = SERIAL_MIDI_STATE_RECEIVED_STATUS_BYTE;
+
+                    uint8_t command = byteReceived & MIDI_MASK_VOICE_COMMAND_BYTE;
+
+                    // Note on / off have 2 data bytes
+                    if (command == MIDI_NOTE_ON || command == MIDI_NOTE_OFF) {
+                        serialMidiPendingDataBytes = 2;
+                    }
                 }
-    
+
                 // Store the data byte
                 serialMidiRawData[SERIAL_MIDI_DATA_BYTES_LENGTH - serialMidiPendingDataBytes] = byteReceived;
                 serialMidiPendingDataBytes--;
                 ESP_LOGI(TAG, "Received data byte: %02X when pending bytes: %d", byteReceived, serialMidiPendingDataBytes);
-    
+
                 if (serialMidiPendingDataBytes < 1)
                 {
-    
+
                     // We're done receiving data
                     serialMidiState = SERIAL_MIDI_STATE_WAITING_FOR_STATUS_BYTE;
                     // Process the message
@@ -573,7 +581,6 @@ void setupSerialMIDI()
                                         serial_midi_buffer_size, 10, &serial_midi_queue, 0));
 }
 
-
 /* -----------------------------------------------------------------------------------------------------------------------------
 
 Let's get cracking
@@ -601,5 +608,4 @@ void app_main(void)
     */
     xTaskCreate(midi_in_task, "midi_in_task", 2048, NULL, 4, NULL);
     xTaskCreate(read_analog_task, "read_analog_task", 4096, NULL, 3, NULL); // 2048 overflows
-
 }
