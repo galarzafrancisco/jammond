@@ -573,6 +573,7 @@ void setupSerialMIDI()
                                         serial_midi_buffer_size, 10, &serial_midi_queue, 0));
 }
 
+
 /* -----------------------------------------------------------------------------------------------------------------------------
 
 Let's get cracking
@@ -590,14 +591,6 @@ void app_main(void)
     // Start serial MIDI
     setupSerialMIDI();
 
-    // // TODO: explore making this a task. Maybe I can have 1 core do coms & non critical stuff
-    // // while the other core does real time audio processing.
-    // for (int i = 0; i < 9; i++)
-    // {
-    //     readAnalogComponents();
-    // }
-    // // ESP_LOGI(TAG, "drawbar reads: [%d] [%d] [%d] [%d] [%d] [%d] [%d] [%d] [%d]", analog_values[0], analog_values[1], analog_values[2], analog_values[3], analog_values[4], analog_values[5], analog_values[6], analog_values[7], analog_values[8]);
-
     /*
     Priorities so far:
     - audio gen 6
@@ -609,5 +602,4 @@ void app_main(void)
     xTaskCreate(midi_in_task, "midi_in_task", 2048, NULL, 4, NULL);
     xTaskCreate(read_analog_task, "read_analog_task", 4096, NULL, 3, NULL); // 2048 overflows
 
-    // vTaskDelay(pdMS_TO_TICKS(1000));
 }
