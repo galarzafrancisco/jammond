@@ -248,15 +248,204 @@ midiThrough read 1 MIDI message from Serial Rx.
 If it's a note on/off it writes it to USB,
 otherwise it ignores it.
 */
-// State machine
-#define SERIAL_MIDI_STATE_WAITING_FOR_STATUS_BYTE 0
-#define SERIAL_MIDI_STATE_RECEIVED_STATUS_BYTE 1
-uint8_t serialMidiState = SERIAL_MIDI_STATE_WAITING_FOR_STATUS_BYTE;
-// Spec of MIDI messages: https://midi.org/summary-of-midi-1-0-messages
-uint8_t serialMidiStatus = 0; // holds the MIDI Status byte received and being processed
-#define SERIAL_MIDI_DATA_BYTES_LENGTH 2
-uint8_t serialMidiRawData[SERIAL_MIDI_DATA_BYTES_LENGTH]; // holds the data bytes received
-volatile uint8_t serialMidiPendingDataBytes = 0;                   // number of data bytes pending
+
+/*
+ * Stub functions for handling note on/off events.
+ * Replace these with your own implementations.
+ */
+void handle_note_on(uint8_t note, uint8_t velocity)
+{
+    // Example: trigger an oscillator or envelope for note ON.
+    ESP_LOGI(TAG, "Note ON: note=%d, velocity=%d\n", note, velocity);
+    return;
+}
+
+void handle_note_off(uint8_t note, uint8_t velocity)
+{
+    // Example: stop the note.
+    ESP_LOGI(TAG, "Note OFF: note=%d, velocity=%d\n", note, velocity);
+    return;
+}
+
+/*
+ * MIDI parser state variables.
+ */
+static uint8_t running_status = 0;  // last status byte (only valid for channel messages)
+static uint8_t data_bytes[2] = {0}; // buffer for data bytes (for messages needing 2 bytes)
+static int data_count = 0;          // how many data bytes received for current message
+static int expected_data_bytes = 0; // how many data bytes expected for current message
+static bool in_sysex = false;       // true if we are inside a sysex message
+
+/*
+ * Returns the number of data bytes expected for a given status.
+ * Only valid for channel messages (0x80 to 0xEF).
+ */
+static inline int get_expected_data_bytes(uint8_t status)
+{
+    switch (status & 0xF0)
+    {
+    case 0x80: // Note Off: status 0x80 - 0x8F
+    case 0x90: // Note On: status 0x90 - 0x9F
+    case 0xA0: // Polyphonic Key Pressure
+    case 0xB0: // Control Change
+    case 0xE0: // Pitch Bend
+        return 2;
+    case 0xC0: // Program Change
+    case 0xD0: // Channel Pressure
+        return 1;
+    default:
+        return 0; // Should not happen for channel messages
+    }
+}
+
+/*
+ * Process a complete MIDI message (i.e. status + data bytes).
+ * Here we only trigger actions if the message is Note On/Off on channel 1.
+ */
+static void process_midi_message(uint8_t status, uint8_t *data, int length)
+{
+    // Only process channel messages (status < 0xF0)
+    // Also, only channel 1: MIDI encodes channel 1 as low nibble == 0.
+    if (status >= 0xF0 || ((status & 0x0F) != 0))
+    {
+        // Not a channel message or not on channel 1; ignore it.
+        return;
+    }
+
+    uint8_t command = status & 0xF0;
+    if (command == 0x90)
+    {
+        // Note On message: data[0] = note, data[1] = velocity.
+        // Velocity 0 is treated as Note Off.
+        uint8_t note = data[0];
+        uint8_t velocity = data[1];
+        if (velocity == 0)
+        {
+            handle_note_off(note, velocity);
+        }
+        else
+        {
+            handle_note_on(note, velocity);
+        }
+    }
+    else if (command == 0x80)
+    {
+        // Note Off message.
+        uint8_t note = data[0];
+        uint8_t velocity = data[1];
+        handle_note_off(note, velocity);
+    }
+    // Other channel messages can be handled (or simply ignored) as needed.
+    return;
+}
+
+/*
+ * midi_parse_byte() processes one incoming MIDI byte.
+ * It implements running status, ignores real-time messages,
+ * and handles sysex messages.
+ */
+void midi_parse_byte(uint8_t byte)
+{
+    if (byte != 0xF8 && byte != 0xFE)
+    {
+        ESP_LOGI(TAG, "uart byte: %02X", byte);
+    }
+    // --- Handle real–time messages ---
+    // MIDI real–time messages are in the range 0xF8-0xFF.
+    // (Except F7 which is used to end sysex.)
+    if (byte >= 0xF8)
+    {
+        // ignore all real–time messages.
+        return;
+    }
+
+    // --- Handle sysex messages ---
+    if (in_sysex)
+    {
+        if (byte >= 0b11111000)
+        {
+            // Real time message can be injected during a sysex stream. Ignore.
+            return;
+        }
+        if (byte == 0b11110111)
+        {
+            // End of sysex
+            in_sysex = false;
+            return;
+        }
+        // Ignore everything else
+        // TODO: what if we receive a channel message? probably we never picked up the end of sysex message!
+        return;
+    }
+
+    // --- Process status vs. data bytes ---
+    if (byte & 0b10000000)
+    {
+        // This is a status byte.
+        if (byte == 0b11110000)
+        {
+            // Start of a sysex message.
+            in_sysex = true;
+            // Clear any running status.
+            running_status = 0;
+            data_count = 0;
+            expected_data_bytes = 0;
+            return;
+        }
+
+        // For system common messages (0b11110001 - 11110110) we simply ignore.
+        // (You might want to handle them in a more complete implementation.)
+        if (byte >= 0b11110001)
+        {
+            // Clear running status for these messages.
+            running_status = 0;
+            data_count = 0;
+            expected_data_bytes = 0;
+            return;
+        }
+
+        // Otherwise, it’s a channel message.
+        // Update running status.
+        running_status = byte;
+        data_count = 0;
+        expected_data_bytes = get_expected_data_bytes(byte);
+        ESP_LOGI(TAG, "status byte: %02X - expected data bytes: %d", running_status, expected_data_bytes);
+    }
+    else
+    {
+        // This is a data byte.
+        if (running_status == 0)
+        {
+            ESP_LOGI(TAG, "Received data byte but running status is 0!!!!");
+            // No active running status, so ignore stray data.
+            return;
+        }
+        // Append the data byte.
+        if (data_count < (int)sizeof(data_bytes))
+        {
+            data_bytes[data_count] = byte;
+            data_count++;
+        }
+        else
+        {
+            // Safety: if too many data bytes, reset.
+            ESP_LOGI(TAG, "Received more data bytes than the size of the buffer. This shouldn't happen!!");
+            data_count = 0;
+            return;
+        }
+        // When we have collected enough data bytes for the message, process it.
+        if (data_count >= expected_data_bytes)
+        {
+            data_count = 0;
+            ESP_LOGI(TAG, "Got a full MIDI message");
+            process_midi_message(running_status, data_bytes, data_count);
+            // Reset data_count but keep the running status so that
+            // subsequent messages (running status) can be processed.
+        }
+        return;
+    }
+    return;
+}
 
 void midi_in_task()
 {
@@ -276,84 +465,7 @@ void midi_in_task()
 
         for (int buf_idx = 0; buf_idx < rxBytes; buf_idx++)
         {
-
-            uint8_t byteReceived = serial_midi_buffer[buf_idx];
-
-            // Check if the byte is status (begining of a message, MSB=1) or data (continuation of a message, MSB=00)
-            if (byteReceived & MIDI_MASK_STATUS_BYTE)
-            {
-
-                // Status message
-
-                // It could be a real time message. If so, ignore it as it could be placed between other messages.
-                // Real time messages have the 5 MSB set to 1
-                if ((byteReceived & MIDI_MASK_REAL_TIME_BYTE) == MIDI_MASK_REAL_TIME_BYTE)
-                {
-                    // ESP_LOGI(TAG, "Received status byte: %02X - real time message", byteReceived);
-                    continue;
-                }
-
-                // Extract command to calculate how many data bytes we need
-                uint8_t command = byteReceived & MIDI_MASK_VOICE_COMMAND_BYTE;
-
-                // Note on / off have 2 data bytes
-                if (command == MIDI_NOTE_ON || command == MIDI_NOTE_OFF)
-                {
-                    ESP_LOGI(TAG, "Received status byte: %02X - note %s", byteReceived, byteReceived == MIDI_NOTE_ON ? "ON" : "OFF");
-                    serialMidiPendingDataBytes = 2;
-                    serialMidiStatus = byteReceived; // store the received status byte
-                    serialMidiState = SERIAL_MIDI_STATE_RECEIVED_STATUS_BYTE;
-                }
-                else
-                {
-                    ESP_LOGI(TAG, "Received status byte: %02X - other when machine state is %d", byteReceived, serialMidiState);
-                    // We don't care about any other message, so let's ignore any data byte we receive
-                    serialMidiState = SERIAL_MIDI_STATE_WAITING_FOR_STATUS_BYTE;
-                }
-
-                continue;
-            }
-            else
-            {
-                // Data message
-
-                // If we get a data message while we are waiting for a status byte,
-                // it's likely that midi is using "running status" which means it's the same status byte as before
-                if (serialMidiState == SERIAL_MIDI_STATE_WAITING_FOR_STATUS_BYTE)
-                {
-                    serialMidiState = SERIAL_MIDI_STATE_RECEIVED_STATUS_BYTE;
-
-                    uint8_t command = byteReceived & MIDI_MASK_VOICE_COMMAND_BYTE;
-
-                    // Note on / off have 2 data bytes
-                    if (command == MIDI_NOTE_ON || command == MIDI_NOTE_OFF) {
-                        serialMidiPendingDataBytes = 2;
-                    }
-                }
-
-                // Store the data byte
-                serialMidiRawData[SERIAL_MIDI_DATA_BYTES_LENGTH - serialMidiPendingDataBytes] = byteReceived;
-                serialMidiPendingDataBytes--;
-                ESP_LOGI(TAG, "Received data byte: %02X when pending bytes: %d", byteReceived, serialMidiPendingDataBytes);
-
-                if (serialMidiPendingDataBytes < 1)
-                {
-
-                    // We're done receiving data
-                    serialMidiState = SERIAL_MIDI_STATE_WAITING_FOR_STATUS_BYTE;
-                    // Process the message
-                    uint8_t command = serialMidiStatus & MIDI_MASK_VOICE_COMMAND_BYTE;
-                    switch (command)
-                    {
-                    case MIDI_NOTE_ON: // 0x90
-                        sendMidiNoteOn(serialMidiStatus & MIDI_MASK_VOICE_CHANNEL_BYTE, serialMidiRawData[0], serialMidiRawData[1]);
-                        break;
-                    case MIDI_NOTE_OFF: // 0x80
-                        sendMidiNoteOff(serialMidiStatus & MIDI_MASK_VOICE_CHANNEL_BYTE, serialMidiRawData[0], serialMidiRawData[1]);
-                        break;
-                    }
-                }
-            }
+            midi_parse_byte(serial_midi_buffer[buf_idx]);
         }
 
         vTaskDelay(pdMS_TO_TICKS(1)); // yield
@@ -564,17 +676,18 @@ void setupSerialMIDI()
         .baud_rate = SERIAL_MIDI_BAUD_RATE,
         .data_bits = UART_DATA_8_BITS,
         .parity = UART_PARITY_DISABLE,
-        .stop_bits = UART_STOP_BITS_1,
-        .flow_ctrl = UART_HW_FLOWCTRL_CTS_RTS,
-        .rx_flow_ctrl_thresh = 122,
+        .stop_bits = UART_STOP_BITS_2,
+        .flow_ctrl = UART_HW_FLOWCTRL_DISABLE,
+        .source_clk = UART_SCLK_DEFAULT,
     };
     // Configure UART parameters
     ESP_ERROR_CHECK(uart_param_config(uart_num, &uart_config));
-
+    
     // // Set UART pins(TX: IO4, RX: IO5, RTS: IO18, CTS: IO19)
     // ESP_ERROR_CHECK(uart_set_pin(UART_NUM_2, 4, 5, 18, 19));
     // Tx, Rx, Rts, Cts (only Rx)
     ESP_ERROR_CHECK(uart_set_pin(MIDI_UART, UART_PIN_NO_CHANGE, MIDI_UART_RX, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE));
+    uart_set_line_inverse(MIDI_UART, UART_SIGNAL_RXD_INV);
 
     // Install UART driver using an event queue here
     ESP_ERROR_CHECK(uart_driver_install(MIDI_UART, serial_midi_buffer_size,
@@ -606,6 +719,6 @@ void app_main(void)
     - midi out: 3
     - analog read: 2
     */
-    xTaskCreate(midi_in_task, "midi_in_task", 2048, NULL, 4, NULL);
+    xTaskCreate(midi_in_task, "midi_in_task", 4096, NULL, 4, NULL);
     xTaskCreate(read_analog_task, "read_analog_task", 4096, NULL, 3, NULL); // 2048 overflows
 }
