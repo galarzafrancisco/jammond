@@ -6,7 +6,7 @@ Libs
 ----------------------------------------------------------------------------------------------------------------------------- */
 
 #include <stdio.h>
-#include "driver/i2s.h"
+#include "driver/i2s_std.h"
 #include "math.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -28,6 +28,7 @@ PIN LAYOUT
 Helpers
 
 ----------------------------------------------------------------------------------------------------------------------------- */
+i2s_chan_handle_t tx_handle;
 
 void generate_sine_wave()
 {
@@ -44,11 +45,9 @@ void generate_sine_wave()
     sample[0] = value;
     sample[1] = value;
 
-    i2s_write(I2S_PORT, sample, sizeof(sample), &bytes_written, portMAX_DELAY);
-
+    i2s_channel_write(tx_handle, sample, sizeof(sample), &bytes_written, portMAX_DELAY);
   }
 }
-
 
 /* -----------------------------------------------------------------------------------------------------------------------------
 
@@ -58,24 +57,30 @@ Setup
 
 void i2s_init()
 {
-  i2s_config_t i2s_config = {
-      .mode = I2S_MODE_MASTER | I2S_MODE_TX, // no Rx
-      .sample_rate = SAMPLE_RATE,
-      .bits_per_sample = BITS_PER_SAMPLE,
-      .channel_format = I2S_CHANNEL_FMT_RIGHT_LEFT, // Stereo
-      .communication_format = I2S_COMM_FORMAT_I2S,
-      .dma_buf_count = 6,
-      .dma_buf_len = 1024,
-      .intr_alloc_flags = ESP_INTR_FLAG_LEVEL1};
 
-  i2s_pin_config_t pin_config = {
-      .bck_io_num = 14,   // Bit Clock (BCK) green
-      .data_out_num = 13, // Data Out (DOUT) yellow
-      .ws_io_num = 12,    // Word Select (LRCK) orange
-      .data_in_num = I2S_PIN_NO_CHANGE};
+  // Step 1: Define the I2S channel configuration
+  i2s_chan_config_t chan_cfg = I2S_CHANNEL_DEFAULT_CONFIG(I2S_NUM_0, I2S_ROLE_MASTER);
 
-  i2s_driver_install(I2S_PORT, &i2s_config, 0, NULL);
-  i2s_set_pin(I2S_PORT, &pin_config);
+  ESP_ERROR_CHECK(i2s_new_channel(&chan_cfg, &tx_handle, NULL));
+
+  // Step 2: Define the standard mode configuration
+  i2s_std_config_t std_cfg = {
+      .clk_cfg = I2S_STD_CLK_DEFAULT_CONFIG(SAMPLE_RATE),
+      .slot_cfg = I2S_STD_PHILIPS_SLOT_DEFAULT_CONFIG(I2S_DATA_BIT_WIDTH_16BIT, I2S_SLOT_MODE_STEREO),
+      .gpio_cfg = {
+          .mclk = I2S_GPIO_UNUSED, // Use I2S_GPIO_UNUSED if not used
+          .bclk = GPIO_NUM_14,
+          .ws = GPIO_NUM_12,
+          .dout = GPIO_NUM_13,
+          .din = I2S_GPIO_UNUSED, // Not used in TX mode
+      },
+  };
+
+  // Step 3: Initialize the I2S channel with the standard mode configuration
+  ESP_ERROR_CHECK(i2s_channel_init_std_mode(tx_handle, &std_cfg));
+
+  // Step 4: Enable the I2S channel
+  ESP_ERROR_CHECK(i2s_channel_enable(tx_handle));
 }
 
 /* -----------------------------------------------------------------------------------------------------------------------------
@@ -87,7 +92,8 @@ Main
 void app_main(void)
 {
   i2s_init();
-    while (1) {
-        generate_sine_wave();
-    }
+  while (1)
+  {
+    generate_sine_wave();
+  }
 }
