@@ -86,13 +86,13 @@ static void uac_device_set_volume_cb(uint32_t volume, void *arg)
 // Invoked when device is mounted
 static void uac_usb_ok_cb(void *arg)
 {
+  uac_device_set_mute_cb(1, NULL);
   receiving_usb_audio = true;
   ESP_LOGI(TAG, "USB OK 🔥");
   // Mute audio for a few seconds to avoid weird sounds while the i2s driver restarts
-  uac_device_set_mute_cb(1, NULL);
   ESP_ERROR_CHECK_WITHOUT_ABORT(i2s_channel_enable(i2s_dac_tx_handle));
   vTaskDelay(pdMS_TO_TICKS(1000));
-  uac_device_set_mute_cb(1, NULL);
+  uac_device_set_mute_cb(0, NULL);
 }
 
 // Invoked when device is unmounted
@@ -106,6 +106,10 @@ static void uac_usb_disconnected_cb(void *arg)
 volatile uint32_t samples_sent = 0;
 static esp_err_t uac_device_output_cb(uint8_t *buf, size_t len, void *arg)
 {
+  if(!receiving_usb_audio) {
+    return ESP_OK;
+  }
+
   size_t bytes_written;
 
   // buf contains interleaved stereo samples in 16-bit PCM format
@@ -117,6 +121,7 @@ static esp_err_t uac_device_output_cb(uint8_t *buf, size_t len, void *arg)
     float scaled_sample = samples[i] * usb_volume; // Apply volume
     samples[i] = (int16_t)scaled_sample;           // Convert back to int16
   }
+
 
   // Send samples to I2S
   i2s_channel_write(i2s_dac_tx_handle, samples, len, &bytes_written, portMAX_DELAY);
