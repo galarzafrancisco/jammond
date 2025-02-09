@@ -1,3 +1,4 @@
+static const char *TAG = "USB audio device";
 
 /* -----------------------------------------------------------------------------------------------------------------------------
 
@@ -5,11 +6,14 @@ Libs
 
 ----------------------------------------------------------------------------------------------------------------------------- */
 
+#include "freertos/FreeRTOS.h" // General OS stuff
+#include "freertos/task.h"     // General OS stuff
 #include <stdio.h>
-#include "driver/i2s_std.h"
-#include "math.h"
-#include "freertos/FreeRTOS.h"
-#include "freertos/task.h"
+#include "esp_err.h"        // error checker
+#include "esp_log.h"        // logger
+#include "driver/i2s_std.h" // I2S driver for the DAC
+#include "math.h"           // To calculate sinewave
+#include "usb_device_uac.h" // USB audio
 
 /* -----------------------------------------------------------------------------------------------------------------------------
 
@@ -19,16 +23,53 @@ PIN LAYOUT
 
 #define I2S_PORT I2S_NUM_0 // Use I2S0
 #define SAMPLE_RATE 44100  // Audio sample rate
-#define BITS_PER_SAMPLE 16 // PCM bit depth
+#define BITS_PER_SAMPLE 16 // PCM bit depth - THIS IS NOT A VARIABLE! DON'T CHANGE IT!
 #define PI 3.14159265
 #define SINE_WAVE_FREQ 220 // A4 note (440 Hz)
+
+/* -----------------------------------------------------------------------------------------------------------------------------
+
+I2S DAC
+
+----------------------------------------------------------------------------------------------------------------------------- */
+i2s_chan_handle_t tx_handle;
+
+/* -----------------------------------------------------------------------------------------------------------------------------
+
+USB audio
+
+----------------------------------------------------------------------------------------------------------------------------- */
+static void uac_device_set_mute_cb(uint32_t mute, void *arg)
+{
+  ESP_LOGI(TAG, "uac_device_set_mute_cb: %" PRIu32 "", mute);
+}
+
+static void uac_device_set_volume_cb(uint32_t volume, void *arg)
+{
+  ESP_LOGI(TAG, "uac_device_set_volume_cb: %" PRIu32 "", volume);
+}
+
+static esp_err_t uac_device_output_cb(uint8_t *buf, size_t len, void *arg)
+{
+  size_t bytes_written;
+
+  // buf contains interleaved stereo samples in 16-bit PCM format
+  int16_t *samples = (int16_t *)buf;          // Treat buffer as an array of 16-bit integers
+  size_t num_samples = len / sizeof(int16_t); // Convert bytes to number of samples
+
+  // Send samples to I2S
+  i2s_channel_write(tx_handle, samples, len, &bytes_written, portMAX_DELAY);
+
+  // ESP_LOGI(TAG, "Received %d bytes from USB, wrote %d bytes to I2S. Samples: %d", len, bytes_written, num_samples);
+
+  return ESP_OK;
+}
 
 /* -----------------------------------------------------------------------------------------------------------------------------
 
 Helpers
 
 ----------------------------------------------------------------------------------------------------------------------------- */
-i2s_chan_handle_t tx_handle;
 
 void generate_sine_wave()
 {
@@ -55,12 +96,13 @@ Setup
 
 ----------------------------------------------------------------------------------------------------------------------------- */
 
-void i2s_init()
+void init_i2s_dac_driver()
 {
 
   // Step 1: Define the I2S channel configuration
   i2s_chan_config_t chan_cfg = I2S_CHANNEL_DEFAULT_CONFIG(I2S_NUM_0, I2S_ROLE_MASTER);
 
+  chan_cfg.dma_desc_num = 10;
   ESP_ERROR_CHECK(i2s_new_channel(&chan_cfg, &tx_handle, NULL));
 
   // Step 2: Define the standard mode configuration
@@ -83,6 +125,19 @@ void i2s_init()
   ESP_ERROR_CHECK(i2s_channel_enable(tx_handle));
 }
 
+void init_usb_uac_audio_device()
+{
+  uac_device_config_t config = {
+      .output_cb = uac_device_output_cb, // receive audio from the host
+      .input_cb = NULL,                  // transfer audio to the host
+      .set_mute_cb = uac_device_set_mute_cb,
+      .set_volume_cb = uac_device_set_volume_cb,
+      .cb_ctx = NULL,
+  };
+
+  uac_device_init(&config);
+}
+
 /* -----------------------------------------------------------------------------------------------------------------------------
 
 Main
@@ -91,9 +146,10 @@ Main
 
 void app_main(void)
 {
-  i2s_init();
-  while (1)
-  {
-    generate_sine_wave();
-  }
+  init_i2s_dac_driver();
+  init_usb_uac_audio_device();
+  // while (1)
+  // {
+  //   generate_sine_wave();
+  // }
 }
