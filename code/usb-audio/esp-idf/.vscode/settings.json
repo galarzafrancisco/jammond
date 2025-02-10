@@ -4,5 +4,10 @@
     "target/esp32s3.cfg"
   ],
   "idf.port": "/dev/tty.wchusbserial58FA0405211",
-  "idf.flashType": "UART"
+  "idf.flashType": "UART",
+  "files.associations": {
+    "usb_device_uac.h": "c",
+    "tusb.h": "c",
+    "i2s_std.h": "c"
+  }
 }
