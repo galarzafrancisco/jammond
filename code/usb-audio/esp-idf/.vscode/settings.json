@@ -8,6 +8,7 @@
   "files.associations": {
     "usb_device_uac.h": "c",
     "tusb.h": "c",
-    "i2s_std.h": "c"
+    "i2s_std.h": "c",
+    "algorithm": "c"
   }
 }

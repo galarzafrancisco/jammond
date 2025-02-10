@@ -5,7 +5,7 @@
 #include <stdint.h>
 #include "esp_err.h"
 
-typedef esp_err_t (*usb_audio_interface_output_cb_t)(int16_t *samples_in_16b, size_t q_samples);
+typedef esp_err_t (*usb_audio_interface_output_cb_t)(float *float_samples, size_t q_samples);
 
 typedef struct
 {

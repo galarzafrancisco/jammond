@@ -72,14 +72,15 @@ static esp_err_t uac_device_output_cb(uint8_t *buffer_8b, size_t q_bytes, void *
   int16_t *samples_in_16b = (int16_t *)buffer_8b; // Treat buffer as an array of 16-bit integers
   size_t q_samples = q_bytes / 2;                 // 2 bytes for each 16 bit sample
 
+  float float_samples[q_samples];
+  
   if (freshly_baked_samples_cb)
   {
     for (size_t i = 0; i < q_samples; i++)
     {
-      float scaled_sample = samples_in_16b[i] * usb_volume; // Apply volume
-      samples_in_16b[i] = (int16_t)scaled_sample;           // Convert back to int16
+      float_samples[i] = samples_in_16b[i] * usb_volume; // Apply volume
     }
-    return freshly_baked_samples_cb(samples_in_16b, q_samples);
+    return freshly_baked_samples_cb(float_samples, q_samples);
   }
   return ESP_OK;
 }
