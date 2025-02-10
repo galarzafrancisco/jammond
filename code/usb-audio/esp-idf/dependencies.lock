@@ -52,6 +52,6 @@ dependencies:
 direct_dependencies:
 - espressif/usb_device_uac
 - idf
-manifest_hash: b1c5720d102c1bfdbfde21820851c00261bedbd99d0356b804b2beb390004c79
+manifest_hash: 363d29e8e5547c5dc5cc1a2ee668c43f4deca450545752efb6b7bf802367ca14
 target: esp32s3
 version: 2.0.0
