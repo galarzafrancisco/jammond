@@ -49,7 +49,7 @@ static void uac_device_set_mute_cb(uint32_t mute, void *arg)
   if (mute)
   {
     usb_pre_mute_volume = usb_volume;
-    usb_volume = 0;
+    usb_volume = 0.0F;
   }
   else
   {
