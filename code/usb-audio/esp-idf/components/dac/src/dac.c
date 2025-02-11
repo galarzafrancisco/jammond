@@ -45,8 +45,8 @@ void dac_init()
   i2s_chan_config_t chan_cfg = I2S_CHANNEL_DEFAULT_CONFIG(I2S_PORT, I2S_ROLE_MASTER);
 
   // buffer_size = dma_frame_num * slot_num * slot_bit_width / 8
-  chan_cfg.dma_desc_num = 6;    // default 6
-  chan_cfg.dma_frame_num = 512; // default 240
+  chan_cfg.dma_desc_num = 4;    // default 6
+  chan_cfg.dma_frame_num = 240; // default 240 (3ms = 144 stereo samples = 288 samples = 576 bytes)
   ESP_ERROR_CHECK(i2s_new_channel(&chan_cfg, &i2s_dac_tx_handle, NULL));
 
   // Step 2: Define the standard mode configuration
