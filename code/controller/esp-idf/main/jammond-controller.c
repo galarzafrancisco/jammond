@@ -61,7 +61,7 @@ The FREENOVE ESP32-s3 has 2 UARTs (I think! based on the pinout. Double check th
 - U1: free. Rx/Tx are 17/18, also called U1TXD and U1RXD
 */
 #define MIDI_UART UART_NUM_1
-#define MIDI_UART_RX 18
+#define MIDI_UART_RX 8
 
 /* -----------------------------------------------------------------------------------------------------------------------------
 
@@ -346,7 +346,7 @@ static void process_midi_message(uint8_t status, uint8_t *data, int length)
  */
 void midi_parse_byte(uint8_t byte)
 {
-    if (byte != 0xF8 && byte != 0xFE)
+    if (byte != 0xF8 && byte != 0xFE && byte != 0xFC)
     {
         ESP_LOGI(TAG, "uart byte: %02X", byte);
     }
@@ -456,19 +456,24 @@ void midi_in_task()
         // Read serial_midi_buffer from UART.
 
         // ESP_ERROR_CHECK(uart_get_buffered_serial_midi_buffer_len(MIDI_UART, (size_t*)&length));
-        int rxBytes = uart_read_bytes(MIDI_UART, serial_midi_buffer, MIDI_RX_BUF_SIZE, 10 / portTICK_PERIOD_MS);
-        if (rxBytes < 1)
-        {
-            vTaskDelay(pdMS_TO_TICKS(1)); // yield
-            continue;
-        }
+        int rxBytes = uart_read_bytes(MIDI_UART, serial_midi_buffer, MIDI_RX_BUF_SIZE, portMAX_DELAY);
+        // if (rxBytes < 1)
+        // {
+        //     vTaskDelay(pdMS_TO_TICKS(1)); // yield
+        //     continue;
+        // }
 
         for (int buf_idx = 0; buf_idx < rxBytes; buf_idx++)
         {
-            midi_parse_byte(serial_midi_buffer[buf_idx]);
+            if (serial_midi_buffer[buf_idx] != 0xFC)
+            {
+                ESP_LOGI(TAG, "%2d/%2d serial %02X", buf_idx + 1, rxBytes, serial_midi_buffer[buf_idx]);
+                serial_midi_buffer[buf_idx] = 0;
+            }
+            // midi_parse_byte(serial_midi_buffer[buf_idx]);
         }
 
-        vTaskDelay(pdMS_TO_TICKS(1)); // yield
+        vTaskDelay(pdMS_TO_TICKS(100)); // yield
     }
 }
 
@@ -676,18 +681,18 @@ void setupSerialMIDI()
         .baud_rate = SERIAL_MIDI_BAUD_RATE,
         .data_bits = UART_DATA_8_BITS,
         .parity = UART_PARITY_DISABLE,
-        .stop_bits = UART_STOP_BITS_2,
+        .stop_bits = UART_STOP_BITS_1,
         .flow_ctrl = UART_HW_FLOWCTRL_DISABLE,
         .source_clk = UART_SCLK_DEFAULT,
     };
     // Configure UART parameters
     ESP_ERROR_CHECK(uart_param_config(uart_num, &uart_config));
-    
+
     // // Set UART pins(TX: IO4, RX: IO5, RTS: IO18, CTS: IO19)
     // ESP_ERROR_CHECK(uart_set_pin(UART_NUM_2, 4, 5, 18, 19));
     // Tx, Rx, Rts, Cts (only Rx)
     ESP_ERROR_CHECK(uart_set_pin(MIDI_UART, UART_PIN_NO_CHANGE, MIDI_UART_RX, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE));
-    uart_set_line_inverse(MIDI_UART, UART_SIGNAL_RXD_INV);
+    ESP_ERROR_CHECK(uart_set_line_inverse(MIDI_UART, UART_SIGNAL_IRDA_RX_INV));
 
     // Install UART driver using an event queue here
     ESP_ERROR_CHECK(uart_driver_install(MIDI_UART, serial_midi_buffer_size,
@@ -720,5 +725,5 @@ void app_main(void)
     - analog read: 2
     */
     xTaskCreate(midi_in_task, "midi_in_task", 4096, NULL, 4, NULL);
-    xTaskCreate(read_analog_task, "read_analog_task", 4096, NULL, 3, NULL); // 2048 overflows
+    // xTaskCreate(read_analog_task, "read_analog_task", 4096, NULL, 3, NULL); // 2048 overflows
 }
