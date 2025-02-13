@@ -60,7 +60,7 @@ The FREENOVE ESP32-s3 has 2 UARTs (I think! based on the pinout. Double check th
 - U0: used for the built-in usb bridge.
 - U1: free. Rx/Tx are 17/18, also called U1TXD and U1RXD
 */
-#define MIDI_UART UART_NUM_1
+#define MIDI_UART UART_NUM_2
 #define MIDI_UART_RX 8
 
 /* -----------------------------------------------------------------------------------------------------------------------------
@@ -120,6 +120,7 @@ uint8_t midi_cable_num = 0; // TinyUSB concept: MIDI jack associated with USB en
 Serial MIDI
 */
 #define SERIAL_MIDI_BAUD_RATE 31250
+// #define SERIAL_MIDI_BAUD_RATE 1200
 const int serial_midi_buffer_size = (1024 * 2);
 QueueHandle_t serial_midi_queue;
 #define MIDI_RX_BUF_SIZE 1
@@ -373,9 +374,17 @@ void midi_parse_byte(uint8_t byte)
             in_sysex = false;
             return;
         }
-        // Ignore everything else
-        // TODO: what if we receive a channel message? probably we never picked up the end of sysex message!
-        return;
+        if (byte < 0b10000000)
+        {
+            // Data byte inside of sysex. Ignore.
+            return;
+        }
+        else
+        {
+            // Status byte inside of sysex. This shouldn't happen.
+            // We probably missed the end of sysex. Break out of it and process it.
+            in_sysex = false;
+        }
     }
 
     // --- Process status vs. data bytes ---
@@ -416,7 +425,7 @@ void midi_parse_byte(uint8_t byte)
         // This is a data byte.
         if (running_status == 0)
         {
-            ESP_LOGI(TAG, "Received data byte but running status is 0!!!!");
+            ESP_LOGI(TAG, "Received data byte but running status is 0!!!!: %02X", byte);
             // No active running status, so ignore stray data.
             return;
         }
@@ -456,24 +465,35 @@ void midi_in_task()
         // Read serial_midi_buffer from UART.
 
         // ESP_ERROR_CHECK(uart_get_buffered_serial_midi_buffer_len(MIDI_UART, (size_t*)&length));
-        int rxBytes = uart_read_bytes(MIDI_UART, serial_midi_buffer, MIDI_RX_BUF_SIZE, portMAX_DELAY);
-        // if (rxBytes < 1)
-        // {
-        //     vTaskDelay(pdMS_TO_TICKS(1)); // yield
-        //     continue;
-        // }
+        int rxBytes = uart_read_bytes(MIDI_UART, serial_midi_buffer, 1, 0);
+        if (rxBytes < 1)
+        {
+            // vTaskDelay(pdMS_TO_TICKS(5)); // yield
+            taskYIELD();
+            continue;
+        }
 
         for (int buf_idx = 0; buf_idx < rxBytes; buf_idx++)
         {
-            if (serial_midi_buffer[buf_idx] != 0xFC)
+            uint8_t value = serial_midi_buffer[buf_idx];
+            if (value != 0xFC && value != 0xFE)
             {
-                ESP_LOGI(TAG, "%2d/%2d serial %02X", buf_idx + 1, rxBytes, serial_midi_buffer[buf_idx]);
-                serial_midi_buffer[buf_idx] = 0;
+
+                ESP_LOGI(TAG, "%2d/%2d serial hex: %02X - dec: %d - bin %d%d%d%d%d%d%d%d", buf_idx + 1, rxBytes, value, value,
+                         (value & 0b10000000) ? 1 : 0,
+                         (value & 0b01000000) ? 1 : 0,
+                         (value & 0b00100000) ? 1 : 0,
+                         (value & 0b00010000) ? 1 : 0,
+                         (value & 0b00001000) ? 1 : 0,
+                         (value & 0b00000100) ? 1 : 0,
+                         (value & 0b00000010) ? 1 : 0,
+                         (value & 0b00000001) ? 1 : 0);
             }
-            // midi_parse_byte(serial_midi_buffer[buf_idx]);
+            midi_parse_byte(value);
         }
 
-        vTaskDelay(pdMS_TO_TICKS(100)); // yield
+        taskYIELD();
+        // vTaskDelay(pdMS_TO_TICKS(5)); // yield
     }
 }
 
@@ -680,6 +700,7 @@ void setupSerialMIDI()
     uart_config_t uart_config = {
         .baud_rate = SERIAL_MIDI_BAUD_RATE,
         .data_bits = UART_DATA_8_BITS,
+        // .data_bits = UART_DATA_BITS_MAX,
         .parity = UART_PARITY_DISABLE,
         .stop_bits = UART_STOP_BITS_1,
         .flow_ctrl = UART_HW_FLOWCTRL_DISABLE,
@@ -693,6 +714,7 @@ void setupSerialMIDI()
     // Tx, Rx, Rts, Cts (only Rx)
     ESP_ERROR_CHECK(uart_set_pin(MIDI_UART, UART_PIN_NO_CHANGE, MIDI_UART_RX, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE));
     ESP_ERROR_CHECK(uart_set_line_inverse(MIDI_UART, UART_SIGNAL_IRDA_RX_INV));
+    // ESP_ERROR_CHECK(uart_set_line_inverse(MIDI_UART, UART_SIGNAL));
 
     // Install UART driver using an event queue here
     ESP_ERROR_CHECK(uart_driver_install(MIDI_UART, serial_midi_buffer_size,
@@ -725,5 +747,5 @@ void app_main(void)
     - analog read: 2
     */
     xTaskCreate(midi_in_task, "midi_in_task", 4096, NULL, 4, NULL);
-    // xTaskCreate(read_analog_task, "read_analog_task", 4096, NULL, 3, NULL); // 2048 overflows
+    xTaskCreate(read_analog_task, "read_analog_task", 4096, NULL, 3, NULL); // 2048 overflows
 }
