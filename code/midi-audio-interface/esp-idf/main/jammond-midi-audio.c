@@ -219,7 +219,9 @@ bool tud_audio_set_req_ep_cb(uint8_t rhport, tusb_control_request_t const *p_req
     }
 
     if (p_request->bRequest == AUDIO10_CS_REQ_SET_CUR && p_request->wLength == 3) {
-        s_current_sample_rate = tu_unaligned_read32(p_buff) & 0x00FFFFFF;
+        s_current_sample_rate = (uint32_t)p_buff[0] |
+                                ((uint32_t)p_buff[1] << 8) |
+                                ((uint32_t)p_buff[2] << 16);
         return true;
     }
 
