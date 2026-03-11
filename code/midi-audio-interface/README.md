@@ -11,12 +11,13 @@ Target behavior:
 
 ## Current status
 
-This initial implementation sets up the new project structure and the end-to-end runtime pipeline for:
-- UART MIDI parsing and forwarding to USB MIDI
+The composite USB implementation is in place in `esp-idf/main/jammond-midi-audio.c` and includes:
+- USB Audio Output + USB MIDI descriptors using raw TinyUSB
+- UART MIDI forwarding to USB MIDI
 - Analog pot scanning and MIDI CC generation
-- DAC output task and ring buffer plumbing
+- USB audio ingestion and forwarding to an external DAC over I2S
 
-The remaining piece is wiring raw TinyUSB Audio class descriptors/callbacks in `main/jammond-midi-audio.c` so USB speaker packets are consumed directly from TinyUSB and pushed to the DAC ring buffer.
+Hardware validation is tracked in `HARDWARE_VALIDATION.md`.
 
 ## Why a new project
 
@@ -24,7 +25,7 @@ The remaining piece is wiring raw TinyUSB Audio class descriptors/callbacks in `
 
 ## Next execution order
 
-1. Add TinyUSB composite descriptor with Audio + MIDI interfaces.
-2. Implement TinyUSB Audio OUT receive callbacks and feed the ring buffer.
-3. Validate sample rate and endpoint sizing at 48k stereo, then expand to 96k if needed.
-4. Validate full device enumeration on macOS/Windows and MIDI merge behavior under load.
+1. Run full hardware validation on macOS and Windows (enumeration, MIDI forwarding, audio continuity).
+2. Add runtime audio sample-rate switching in the I2S path.
+3. Define and implement USB MIDI OUT handling policy.
+4. Write bring-up and validation guide for repeatable lab testing.
