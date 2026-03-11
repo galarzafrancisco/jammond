@@ -8,3 +8,6 @@ Contains code related to generating the Hammond sound. This is just for fun, a P
 
 ## Leslie
 Same as above.
+
+## MIDI + Audio interface
+Contains a new ESP-IDF codebase for a single ESP32-S3 firmware exposing both USB MIDI and USB Audio output paths.
