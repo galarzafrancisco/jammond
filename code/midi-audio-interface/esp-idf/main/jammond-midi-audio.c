@@ -9,6 +9,7 @@ static const char *TAG = "jammond-midi-audio";
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
+#include "freertos/stream_buffer.h"
 #include "freertos/task.h"
 #include "tinyusb.h"
 #include "tusb.h"
@@ -48,29 +49,37 @@ static const uint8_t s_drawbar_cc_map[9] = {12, 13, 14, 15, 16, 17, 18, 19, 20};
 #define I2S_WS               GPIO_NUM_12
 
 #define AUDIO_SAMPLE_RATE    48000
-#define AUDIO_RING_SAMPLES   (AUDIO_SAMPLE_RATE / 8)
+#define AUDIO_CHANNELS       2
+#define AUDIO_SAMPLE_BYTES   sizeof(int16_t)
+#define AUDIO_FRAME_BYTES    (AUDIO_CHANNELS * AUDIO_SAMPLE_BYTES)
+#define AUDIO_USB_EP_SIZE    ((AUDIO_SAMPLE_RATE / 1000) * AUDIO_FRAME_BYTES)
+#define AUDIO_STREAM_FRAMES  (AUDIO_SAMPLE_RATE / 4)
+#define AUDIO_STREAM_BYTES   (AUDIO_STREAM_FRAMES * AUDIO_FRAME_BYTES)
 
-static int16_t s_audio_ring[AUDIO_RING_SAMPLES];
-static volatile size_t s_audio_wr_idx;
-static volatile size_t s_audio_rd_idx;
 static i2s_chan_handle_t s_i2s_tx;
+static StreamBufferHandle_t s_audio_stream;
+static TaskHandle_t s_audio_usb_task;
+static uint32_t s_current_sample_rate = AUDIO_SAMPLE_RATE;
 
 // ----------------------------------
 // TinyUSB descriptors (MIDI for now)
 // ----------------------------------
 
 enum {
-    ITF_NUM_MIDI = 0,
+    ITF_NUM_AUDIO_CONTROL = 0,
+    ITF_NUM_AUDIO_STREAMING_SPK,
+    ITF_NUM_MIDI,
     ITF_NUM_MIDI_STREAMING,
     ITF_COUNT,
 };
 
 enum {
     EP_EMPTY = 0,
+    EPNUM_AUDIO_OUT = 0x01,
     EPNUM_MIDI,
 };
 
-#define TUSB_DESC_TOTAL_LEN (TUD_CONFIG_DESC_LEN + TUD_MIDI_DESC_LEN)
+#define TUSB_DESC_TOTAL_LEN (TUD_CONFIG_DESC_LEN + TUD_AUDIO10_SPEAKER_STEREO_DESC_LEN(1) + TUD_MIDI_DESC_LEN)
 
 static const char s_lang_desc[] = {0x09, 0x04};
 static const char *s_string_desc[] = {
@@ -78,12 +87,14 @@ static const char *s_string_desc[] = {
     "Jammond",
     "Jammond MIDI+Audio",
     "jammond-midi-audio-01",
+    "Jammond Audio",
     "Jammond MIDI",
 };
 
 static const uint8_t s_cfg_desc[] = {
     TUD_CONFIG_DESCRIPTOR(1, ITF_COUNT, 0, TUSB_DESC_TOTAL_LEN, 0, 100),
-    TUD_MIDI_DESCRIPTOR(ITF_NUM_MIDI, 4, EPNUM_MIDI, (0x80 | EPNUM_MIDI), 64),
+    TUD_AUDIO10_SPEAKER_STEREO_DESCRIPTOR(ITF_NUM_AUDIO_CONTROL, 4, AUDIO_SAMPLE_BYTES, (AUDIO_SAMPLE_BYTES * 8), EPNUM_AUDIO_OUT, AUDIO_USB_EP_SIZE, AUDIO_SAMPLE_RATE),
+    TUD_MIDI_DESCRIPTOR(ITF_NUM_MIDI, 5, EPNUM_MIDI, (0x80 | EPNUM_MIDI), 64),
 };
 
 // -----------------------------
@@ -152,47 +163,129 @@ static void controls_read_task(void *arg) {
 // Audio helpers
 // -----------------------------
 
-static inline size_t ring_next(size_t index) {
-    size_t next = index + 1;
-    if (next >= AUDIO_RING_SAMPLES) {
-        next = 0;
+static size_t audio_buffer_write(const uint8_t *data, size_t len) {
+    if (s_audio_stream == NULL || len == 0) {
+        return 0;
     }
-    return next;
+
+    return xStreamBufferSend(s_audio_stream, data, len, 0);
 }
 
-static void audio_ring_push_samples(const int16_t *samples, size_t count) {
-    for (size_t i = 0; i < count; i++) {
-        size_t next = ring_next(s_audio_wr_idx);
-        if (next == s_audio_rd_idx) {
-            break;
+static size_t audio_buffer_read(uint8_t *data, size_t len) {
+    if (s_audio_stream == NULL || len == 0) {
+        return 0;
+    }
+
+    return xStreamBufferReceive(s_audio_stream, data, len, pdMS_TO_TICKS(10));
+}
+
+static void usb_audio_ingest_task(void *arg) {
+    (void)arg;
+
+    uint8_t usb_buf[512];
+    while (1) {
+        ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(4));
+        while (tud_audio_mounted()) {
+            uint16_t available = tud_audio_available();
+            if (available == 0) {
+                break;
+            }
+
+            uint16_t req = available;
+            if (req > sizeof(usb_buf)) {
+                req = sizeof(usb_buf);
+            }
+
+            uint16_t read = tud_audio_read(usb_buf, req);
+            if (read == 0) {
+                break;
+            }
+
+            (void)audio_buffer_write(usb_buf, read);
         }
-        s_audio_ring[s_audio_wr_idx] = samples[i];
-        s_audio_wr_idx = next;
     }
 }
 
-static size_t audio_ring_pop_samples(int16_t *samples, size_t count) {
-    size_t copied = 0;
-    while (copied < count && s_audio_rd_idx != s_audio_wr_idx) {
-        samples[copied++] = s_audio_ring[s_audio_rd_idx];
-        s_audio_rd_idx = ring_next(s_audio_rd_idx);
+static bool tud_audio_try_parse_ep_freq(tusb_control_request_t const *p_request) {
+    uint8_t ctrl_sel = TU_U16_HIGH(p_request->wValue);
+    return ctrl_sel == AUDIO10_EP_CTRL_SAMPLING_FREQ;
+}
+
+bool tud_audio_set_req_ep_cb(uint8_t rhport, tusb_control_request_t const *p_request, uint8_t *p_buff) {
+    (void)rhport;
+
+    if (!tud_audio_try_parse_ep_freq(p_request)) {
+        return false;
     }
 
-    while (copied < count) {
-        samples[copied++] = 0;
+    if (p_request->bRequest == AUDIO10_CS_REQ_SET_CUR && p_request->wLength == 3) {
+        s_current_sample_rate = tu_unaligned_read32(p_buff) & 0x00FFFFFF;
+        return true;
     }
 
-    return copied;
+    return false;
+}
+
+bool tud_audio_get_req_ep_cb(uint8_t rhport, tusb_control_request_t const *p_request) {
+    if (!tud_audio_try_parse_ep_freq(p_request)) {
+        return false;
+    }
+
+    if (p_request->bRequest == AUDIO10_CS_REQ_GET_CUR) {
+        uint8_t freq[3];
+        freq[0] = (uint8_t)(s_current_sample_rate & 0xFF);
+        freq[1] = (uint8_t)((s_current_sample_rate >> 8) & 0xFF);
+        freq[2] = (uint8_t)((s_current_sample_rate >> 16) & 0xFF);
+        return tud_audio_buffer_and_schedule_control_xfer(rhport, p_request, freq, sizeof(freq));
+    }
+
+    return false;
+}
+
+bool tud_audio_set_itf_cb(uint8_t rhport, tusb_control_request_t const *p_request) {
+    (void)rhport;
+    uint8_t const itf = tu_u16_low(tu_le16toh(p_request->wIndex));
+    uint8_t const alt = tu_u16_low(tu_le16toh(p_request->wValue));
+
+    if (itf == ITF_NUM_AUDIO_STREAMING_SPK && alt == 0 && s_audio_stream != NULL) {
+        xStreamBufferReset(s_audio_stream);
+    }
+
+    return true;
+}
+
+bool tud_audio_set_itf_close_ep_cb(uint8_t rhport, tusb_control_request_t const *p_request) {
+    return tud_audio_set_itf_cb(rhport, p_request);
+}
+
+bool tud_audio_rx_done_isr(uint8_t rhport, uint16_t n_bytes_received, uint8_t func_id, uint8_t ep_out, uint8_t cur_alt_setting) {
+    (void)rhport;
+    (void)n_bytes_received;
+    (void)func_id;
+    (void)ep_out;
+    (void)cur_alt_setting;
+
+    if (s_audio_usb_task != NULL) {
+        BaseType_t hp_task_woken = pdFALSE;
+        vTaskNotifyGiveFromISR(s_audio_usb_task, &hp_task_woken);
+        portYIELD_FROM_ISR(hp_task_woken);
+    }
+
+    return true;
 }
 
 static void audio_out_task(void *arg) {
     (void)arg;
 
-    int16_t block[256];
+    uint8_t block[512];
     while (1) {
-        size_t samples = audio_ring_pop_samples(block, 256);
+        size_t bytes = audio_buffer_read(block, sizeof(block));
+        if (bytes < sizeof(block)) {
+            memset(block + bytes, 0, sizeof(block) - bytes);
+        }
+
         size_t bytes_written = 0;
-        i2s_channel_write(s_i2s_tx, block, samples * sizeof(int16_t), &bytes_written, portMAX_DELAY);
+        i2s_channel_write(s_i2s_tx, block, sizeof(block), &bytes_written, portMAX_DELAY);
     }
 }
 
@@ -216,16 +309,6 @@ static void dac_init(void) {
 
     ESP_ERROR_CHECK(i2s_channel_init_std_mode(s_i2s_tx, &std_cfg));
     ESP_ERROR_CHECK(i2s_channel_enable(s_i2s_tx));
-}
-
-// ---------------------------------------
-// TODO: TinyUSB Audio callbacks (Phase 2)
-// ---------------------------------------
-
-// This is intentionally a local helper until Audio class callbacks are added.
-// It lets the existing runtime path be validated with synthetic or forwarded data.
-static void usb_audio_feed_pcm16(const int16_t *stereo_samples, size_t sample_count) {
-    audio_ring_push_samples(stereo_samples, sample_count);
 }
 
 // -----------------------------
@@ -280,14 +363,18 @@ static void setup_usb(void) {
     };
 
     ESP_ERROR_CHECK(tinyusb_driver_install(&usb_cfg));
-    ESP_LOGI(TAG, "TinyUSB started with MIDI descriptor. Audio descriptor wiring is next.");
+    ESP_LOGI(TAG, "TinyUSB started with composite Audio (OUT) + MIDI descriptors.");
 }
 
 void app_main(void) {
     memset((void *)s_cached_cc, 0, sizeof(s_cached_cc));
     s_analog_idx = 0;
-    s_audio_wr_idx = 0;
-    s_audio_rd_idx = 0;
+
+    s_audio_stream = xStreamBufferCreate(AUDIO_STREAM_BYTES, AUDIO_USB_EP_SIZE);
+    if (s_audio_stream == NULL) {
+        ESP_LOGE(TAG, "Failed to create audio stream buffer");
+        return;
+    }
 
     setup_adc_mux();
     setup_uart_midi();
@@ -296,12 +383,6 @@ void app_main(void) {
 
     xTaskCreate(midi_uart_forward_task, "midi_uart_forward_task", 4096, NULL, 4, NULL);
     xTaskCreate(controls_read_task, "controls_read_task", 4096, NULL, 3, NULL);
+    xTaskCreate(usb_audio_ingest_task, "usb_audio_ingest_task", 4096, NULL, 5, &s_audio_usb_task);
     xTaskCreatePinnedToCore(audio_out_task, "audio_out_task", 4096, NULL, 5, NULL, 1);
-
-    // Keep at least one warm path for DAC verification until TinyUSB Audio callbacks are hooked.
-    int16_t silence[128] = {0};
-    while (1) {
-        usb_audio_feed_pcm16(silence, 128);
-        vTaskDelay(pdMS_TO_TICKS(10));
-    }
 }
